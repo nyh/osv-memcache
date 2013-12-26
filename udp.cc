@@ -126,9 +126,34 @@ static void process_request(const char* packet, size_t len,
     }
     if (n == 3) {
         if(!strncmp(packet, "get", 3)) {
-            std::cerr<<"got 'get'\n";
+            //std::cerr<<"got 'get'\n";
+            char key[251];
+            // TODO: do this in a loop to support multiple keys on one command
+            auto z = sscanf(packet+4, "%250s", &key);
+            if (z != 1) {
+                send_cmd_error(sendfd, remote_addr, rbuf, rbuf_len);
+                return;
+            }
+            // TODO: do we need to copy the string just for find??? Need to be able to search without copy... HOW?
+            auto it = cache.find(std::string(key));
+            if (it == cache.end()) {
+                //std::cerr << "not found\n";
+                strcpy(rbuf + sizeof(memcached_header), "END\r\n");
+                send(sendfd, remote_addr, rbuf, sizeof(memcached_header) + 5);
+                return;
+            } else {
+                //std::cerr << "found\n";
+                auto of = sizeof(memcached_header);
+                of += snprintf(rbuf + of, rbuf_len - of, "VALUE %s %ld %d\r\n", key, it->second.flags, it->second.data.length());
+                // TODO: verify we have enough place in rbuf!
+                memcpy(rbuf + of, it->second.data.data(), it->second.data.length());
+                of += it->second.data.length();
+                strcpy(rbuf + of, "END\r\n");
+                send(sendfd, remote_addr, rbuf, of + 5);
+                return;
+            }
         } else if(!strncmp(packet, "set", 3)) {
-            std::cerr<<"got 'set'\n";
+            //std::cerr<<"got 'set'\n";
             long flags, exptime, bytes;
             int end;
             char key[251];
@@ -146,7 +171,7 @@ static void process_request(const char* packet, size_t len,
             }
             cache[std::string(key)] = { std::string(packet + 4 + end + 2, bytes), (u32)flags, exptime};
             send_cmd_stored(sendfd, remote_addr, rbuf, rbuf_len);
-            std::cerr<<"got set with " << bytes << " bytes\n";
+            //std::cerr<<"got set with " << bytes << " bytes\n";
             return;
         }
     }
@@ -167,7 +192,7 @@ void udp_server()
         struct sockaddr_in remote_addr;
         socklen_t len = sizeof(remote_addr);
         auto n = recvfrom(fd, buf, sizeof(buf) ,0, (struct sockaddr *) &remote_addr, &len);
-        std::cerr << "got packet.\n";
+        //std::cerr << "got packet.\n";
         // TODO: check if n<0 and abort...
         // TODO: don't send repsonses on the same fd we read on!!! The locks are completely unecessary.
         process_request(buf, n, rbuf, sizeof(rbuf), fd, remote_addr);
