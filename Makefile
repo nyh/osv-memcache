@@ -1,9 +1,12 @@
-all: osvm
+BIN = osvm.so
 
-OBJS = main.o
+all: $(BIN)
 
-CXXFLAGS = -O2 -fPIC -std=c++11
+OBJS = main.o udp.o # server.o context.o
+
+OSV_INCLUDES = -I../osv/include -I../osv/arch/x64 -I../osv
+CXXFLAGS = -O2 -fPIC -std=c++11 $(OSV_INCLUDES)
 LDFLAGS = -shared
 
-osvm: $(OBJS)
-	$(CXX) $(LDFLAGS) -o osvm.so $(OBJS)
+$(BIN): $(OBJS)
+	$(CXX) $(LDFLAGS) -o $(BIN) $(OBJS)
