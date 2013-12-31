@@ -40,9 +40,17 @@ static int listening_udp_socket(int port)
     return fd;
 }
 
+// Copied from bsd/sys/sys/param.h. Probably should appear in just one place
+// TODO: also need little endian version!!
+#define __bswap16_const(_x) (__uint16_t)((_x) << 8 | (_x) >> 8)
+static constexpr inline u_int16_t __htons(u_int16_t x) { return __bswap16_const(x); }
+static constexpr inline u_int16_t __ntohs(u_int16_t x) { return __bswap16_const(x); }
+
+
 // The first 8 bytes of each UDP memcached request is the following header,
 // composed of four 16-bit integers in network byte order:
-struct memcached_header {
+class memcached_header {
+private:
     // request_id is an opaque value that the server needs to echo back
     // to the client.
     u16 request_id;
@@ -51,11 +59,23 @@ struct memcached_header {
     // Memcached does not currently support multi-datagram requests, so
     // neither do we have to. Memcached does support multi-datagram responses,
     // but the documentation suggest that TCP is more suitable for this
-    // use case anyway.
+    // use case anyway, so we don't support this case as well.
+    // This means we can always reuse a request header as the response header!
     u16 sequence_number_n;
     u16 number_of_datagrams_n;
     // Reserved for future use, should be 0
     u16 reserved;
+
+    static constexpr auto htons_1 = __htons(1);
+public:
+    explicit memcached_header(u16 rid) :
+            request_id(rid), sequence_number_n(0),
+            number_of_datagrams_n(htons_1), reserved(0) {}
+    inline bool invalid() const {
+        return sequence_number_n != 0 ||
+                number_of_datagrams_n != htons_1;
+        // Could have also checked reserved !=0, but memaslap actually sets it to 1...
+    }
 };
 
 // TODO: Obviously, move the hash table to a different source file. Make it a class.
@@ -68,51 +88,85 @@ struct memcache_value {
     u32 flags;
     time_t exptime;
 };
+
 typedef std::string memcache_key;
 std::unordered_map<memcache_key, memcache_value> cache;
 
 
-static void send(int fd, struct sockaddr_in &remote_addr, char *rbuf, size_t len)
+static void send(int fd, const struct sockaddr_in &remote_addr,
+        const memcached_header &header, const char *body, size_t bodylen)
 {
-    sendto(fd, rbuf, len, 0, (struct sockaddr *)&remote_addr, sizeof(remote_addr));
+    iovec iov[2];
+    // The msghdr type predates "const". sendmsg will not write to any of the
+    // pointers we give it.
+    iov[0].iov_base = const_cast<void*>((const void*)&header);
+    iov[0].iov_len = sizeof(header);
+    iov[1].iov_base = const_cast<void*>((const void*)body);
+    iov[1].iov_len = bodylen;
+    msghdr msg;
+    msg.msg_name = const_cast<void*>((const void*)&remote_addr);
+    msg.msg_namelen = sizeof(remote_addr);
+    msg.msg_iov = iov;
+    msg.msg_iovlen = 2;
+    msg.msg_control = 0;
+    msg.msg_controllen = 0;
+    sendmsg(fd, &msg, 0);
 }
 
-static void send_msg(int fd, struct sockaddr_in &remote_addr, const char *msg, size_t msglen, char *rbuf, size_t rbuf_len)
+static void send(int fd, const struct sockaddr_in &remote_addr,
+        const memcached_header &header, const char *body1, size_t bodylen1,
+        const char *body2, size_t bodylen2)
 {
-    assert(rbuf_len >= sizeof(memcached_header)+msglen);
-    strcpy(rbuf + sizeof(memcached_header), msg);
-    send(fd, remote_addr, rbuf, sizeof(memcached_header)+msglen);
+    iovec iov[3];
+    // The msghdr type predates "const". sendmsg will not write to any of the
+    // pointers we give it.
+    iov[0].iov_base = const_cast<void*>((const void*)&header);
+    iov[0].iov_len = sizeof(header);
+    iov[1].iov_base = const_cast<void*>((const void*)body1);
+    iov[1].iov_len = bodylen1;
+    iov[2].iov_base = const_cast<void*>((const void*)body2);
+    iov[2].iov_len = bodylen2;
+    msghdr msg;
+    msg.msg_name = const_cast<void*>((const void*)&remote_addr);
+    msg.msg_namelen = sizeof(remote_addr);
+    msg.msg_iov = iov;
+    msg.msg_iovlen = 3;
+    msg.msg_control = 0;
+    msg.msg_controllen = 0;
+    sendmsg(fd, &msg, 0);
 }
-static void send_cmd_error(int fd, struct sockaddr_in &remote_addr, char *rbuf, size_t rbuf_len)
+
+static void send_cmd_error(int fd, const struct sockaddr_in &remote_addr,
+        const memcached_header &header)
 {
-    return send_msg(fd, remote_addr, "ERROR\r\n", 7, rbuf, rbuf_len);
+    constexpr static char msg[] = "ERROR\r\n";
+    send(fd, remote_addr, header, msg, sizeof(msg)-1);
 }
-static void send_cmd_stored(int fd, struct sockaddr_in &remote_addr, char *rbuf, size_t rbuf_len)
+static void send_cmd_stored(int fd, const struct sockaddr_in &remote_addr,
+        const memcached_header &header)
 {
-    return send_msg(fd, remote_addr, "STORED\r\n", 8, rbuf, rbuf_len);
+    constexpr static char msg[] = "STORED\r\n";
+    send(fd, remote_addr, header, msg, sizeof(msg)-1);
+}
+static void send_cmd_end(int fd, const struct sockaddr_in &remote_addr,
+        const memcached_header &header)
+{
+    constexpr static char msg[] = "END\r\n";
+    send(fd, remote_addr, header, msg, sizeof(msg)-1);
 }
 
 
-// TODO: can avoid rbuf if we use scatter-gather on send.
 static void process_request(const char* packet, size_t len,
-        char *rbuf, size_t rbuf_len, int sendfd, struct sockaddr_in &remote_addr)
+        int sendfd, struct sockaddr_in &remote_addr)
 {
-    static const auto htons_1 = htons(1);
-
-    auto *header = (memcached_header *) packet;
-    auto *rheader = (memcached_header *) rbuf;
-    if (len < sizeof(*header)) {
+    auto &header = *(memcached_header *) packet;
+    if (len < sizeof(header) || header.invalid()) {
         // Cannot send reply, have no sequence number to reply to..
-        std::cerr << "unknown packet format\n";
+        std::cerr << "unknown packet format. len=" << len << "\n";
         return;
     }
-    len -= sizeof(*header);
-    packet += sizeof(*header);
-    assert (rbuf_len >= sizeof(*rheader));
-    rheader->request_id = header->request_id;
-    rheader->sequence_number_n = 0;
-    rheader->number_of_datagrams_n = htons_1;
-    rheader->reserved = 0;
+    len -= sizeof(header);
+    packet += sizeof(header);
 
     // TODO: consider a more efficient parser...
     const char *p = packet, *pastend = packet + len;
@@ -121,7 +175,7 @@ static void process_request(const char* packet, size_t len,
     }
     auto n = p - packet;
     if (p == pastend) {
-        send_cmd_error(sendfd, remote_addr, rbuf, rbuf_len);
+        send_cmd_error(sendfd, remote_addr, header);
         return;
     }
     if (n == 3) {
@@ -131,25 +185,23 @@ static void process_request(const char* packet, size_t len,
             // TODO: do this in a loop to support multiple keys on one command
             auto z = sscanf(packet+4, "%250s", &key);
             if (z != 1) {
-                send_cmd_error(sendfd, remote_addr, rbuf, rbuf_len);
+                send_cmd_error(sendfd, remote_addr, header);
                 return;
             }
             // TODO: do we need to copy the string just for find??? Need to be able to search without copy... HOW?
             auto it = cache.find(std::string(key));
             if (it == cache.end()) {
-                //std::cerr << "not found\n";
-                strcpy(rbuf + sizeof(memcached_header), "END\r\n");
-                send(sendfd, remote_addr, rbuf, sizeof(memcached_header) + 5);
+                send_cmd_end(sendfd, remote_addr, header);
                 return;
             } else {
                 //std::cerr << "found\n";
-                auto of = sizeof(memcached_header);
-                of += snprintf(rbuf + of, rbuf_len - of, "VALUE %s %ld %d\r\n", key, it->second.flags, it->second.data.length());
-                // TODO: verify we have enough place in rbuf!
-                memcpy(rbuf + of, it->second.data.data(), it->second.data.length());
-                of += it->second.data.length();
-                strcpy(rbuf + of, "END\r\n");
-                send(sendfd, remote_addr, rbuf, of + 5);
+                char reply[sizeof(key)+128] = "VALUE "; // TODO: make length less ugly
+                char *r = reply + 6;
+                strcpy(r, key);
+                r += strlen(key); // do we have this already?
+                r += sprintf(r, "%ld %d\r\n", it->second.flags, it->second.data.length());
+                constexpr static char msg[] = "END\r\n";
+                send(sendfd, remote_addr, header, reply, r - reply, msg, sizeof(msg) - 1);
                 return;
             }
         } else if(!strncmp(packet, "set", 3)) {
@@ -160,17 +212,17 @@ static void process_request(const char* packet, size_t len,
             auto z =
               sscanf(packet+4, "%250s %ld %ld %ld%n", &key, &flags, &exptime, &bytes, &end);
             if (z != 4) {
-                send_cmd_error(sendfd, remote_addr, rbuf, rbuf_len);
+                send_cmd_error(sendfd, remote_addr, header);
                 return;
             }
             // TODO: check if there is "noreply" at 'end'
             if (len < 4 + end + 2 + bytes) {
                 std::cerr << "got too small packet ?! len="<<len<<", end="<<end<<", bytes="<<bytes<<"\n";
-                send_cmd_error(sendfd, remote_addr, rbuf, rbuf_len);
+                send_cmd_error(sendfd, remote_addr, header);
                 return;
             }
             cache[std::string(key)] = { std::string(packet + 4 + end + 2, bytes), (u32)flags, exptime};
-            send_cmd_stored(sendfd, remote_addr, rbuf, rbuf_len);
+            send_cmd_stored(sendfd, remote_addr, header);
             //std::cerr<<"got set with " << bytes << " bytes\n";
             return;
         }
@@ -178,7 +230,7 @@ static void process_request(const char* packet, size_t len,
 
     std::cerr<<"Error... Got "<<packet<<"\n";
 
-    send_cmd_error(sendfd, remote_addr, rbuf, rbuf_len);
+    send_cmd_error(sendfd, remote_addr, header);
 }
 
 void udp_server()
@@ -195,7 +247,7 @@ void udp_server()
         //std::cerr << "got packet.\n";
         // TODO: check if n<0 and abort...
         // TODO: don't send repsonses on the same fd we read on!!! The locks are completely unecessary.
-        process_request(buf, n, rbuf, sizeof(rbuf), fd, remote_addr);
+        process_request(buf, n, fd, remote_addr);
         //sendto(sockfd,mesg,n,0,(struct sockaddr *)&cliaddr,sizeof(cliaddr));
     }
 }
