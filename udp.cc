@@ -92,77 +92,75 @@ struct memcache_value {
 typedef std::string memcache_key;
 std::unordered_map<memcache_key, memcache_value> cache;
 
+//template<class First, class... Rest> void do_to_iovec(iovec &iov, int offset, First first, Rest... rest)
+//{
+//    iov[offset] = first;
+//    to_iovec(iov, offset+1, rest)
+//}
+//template<class First> void do_to_iovec(iovec &iov, int offset, First first)
+//{
+//    iov[offset] = first;
+//}
+//
+//
+//template<class... Types> iovec &&to_iovec(Types... args)
+//{
+//    iovec iov[sizeof...(Types)];
+//    do_to_iovec(iov, 0, args...);
+//    return iov;
+//}
 
-static void send(int fd, const struct sockaddr_in &remote_addr,
-        const memcached_header &header,
-        const char *body, size_t bodylen)
-{
-    iovec iov[2];
-    // The msghdr type predates "const". sendmsg will not write to any of the
-    // pointers we give it.
-    iov[0].iov_base = const_cast<void*>((const void*)&header);
-    iov[0].iov_len = sizeof(header);
-    iov[1].iov_base = const_cast<void*>((const void*)body);
-    iov[1].iov_len = bodylen;
+
+static inline void send(int fd, const struct sockaddr_in &remote_addr, iovec *iov, size_t iovlen) {
     msghdr msg;
+    msg.msg_iov = iov;
+    msg.msg_iovlen = iovlen;
     msg.msg_name = const_cast<void*>((const void*)&remote_addr);
     msg.msg_namelen = sizeof(remote_addr);
-    msg.msg_iov = iov;
-    msg.msg_iovlen = 2;
     msg.msg_control = 0;
     msg.msg_controllen = 0;
     sendmsg(fd, &msg, 0);
 }
 
-static void send(int fd, const struct sockaddr_in &remote_addr,
+static inline void send(int fd, const struct sockaddr_in &remote_addr,
+        const memcached_header &header,
+        const char *body, size_t bodylen)
+{
+    // The msghdr type predates "const". sendmsg will not write to any of the
+    // pointers we give it.
+    iovec iov[] = {
+            { const_cast<void*>((const void*)&header), sizeof(header) },
+            { const_cast<void*>((const void*)body), bodylen },
+    };
+    send(fd, remote_addr, iov, sizeof(iov) / sizeof(iov[0]));
+}
+
+static inline void send(int fd, const struct sockaddr_in &remote_addr,
         const memcached_header &header,
         const char *body1, size_t bodylen1,
         const char *body2, size_t bodylen2)
 {
-    iovec iov[3];
-    // The msghdr type predates "const". sendmsg will not write to any of the
-    // pointers we give it.
-    iov[0].iov_base = const_cast<void*>((const void*)&header);
-    iov[0].iov_len = sizeof(header);
-    iov[1].iov_base = const_cast<void*>((const void*)body1);
-    iov[1].iov_len = bodylen1;
-    iov[2].iov_base = const_cast<void*>((const void*)body2);
-    iov[2].iov_len = bodylen2;
-    msghdr msg;
-    msg.msg_name = const_cast<void*>((const void*)&remote_addr);
-    msg.msg_namelen = sizeof(remote_addr);
-    msg.msg_iov = iov;
-    msg.msg_iovlen = 3;
-    msg.msg_control = 0;
-    msg.msg_controllen = 0;
-    sendmsg(fd, &msg, 0);
+    iovec iov[] = {
+            { const_cast<void*>((const void*)&header), sizeof(header) },
+            { const_cast<void*>((const void*)body1), bodylen1 },
+            { const_cast<void*>((const void*)body2), bodylen2 },
+    };
+    send(fd, remote_addr, iov, sizeof(iov) / sizeof(iov[0]));
 }
 
-static void send(int fd, const struct sockaddr_in &remote_addr,
+static inline void send(int fd, const struct sockaddr_in &remote_addr,
         const memcached_header &header,
         const char *body1, size_t bodylen1,
         const char *body2, size_t bodylen2,
         const char *body3, size_t bodylen3)
 {
-    iovec iov[4];
-    // The msghdr type predates "const". sendmsg will not write to any of the
-    // pointers we give it.
-    iov[0].iov_base = const_cast<void*>((const void*)&header);
-    iov[0].iov_len = sizeof(header);
-    iov[1].iov_base = const_cast<void*>((const void*)body1);
-    iov[1].iov_len = bodylen1;
-    iov[2].iov_base = const_cast<void*>((const void*)body2);
-    iov[2].iov_len = bodylen2;
-    iov[3].iov_base = const_cast<void*>((const void*)body3);
-    iov[3].iov_len = bodylen3;
-    msghdr msg;
-    msg.msg_name = const_cast<void*>((const void*)&remote_addr);
-    msg.msg_namelen = sizeof(remote_addr);
-    msg.msg_iov = iov;
-    msg.msg_iovlen = 4;
-    msg.msg_control = 0;
-    msg.msg_controllen = 0;
-    sendmsg(fd, &msg, 0);
+    iovec iov[] = {
+            { const_cast<void*>((const void*)&header), sizeof(header) },
+            { const_cast<void*>((const void*)body1), bodylen1 },
+            { const_cast<void*>((const void*)body2), bodylen2 },
+            { const_cast<void*>((const void*)body3), bodylen3 },
+    };
+    send(fd, remote_addr, iov, sizeof(iov) / sizeof(iov[0]));
 }
 
 
