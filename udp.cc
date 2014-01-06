@@ -94,7 +94,8 @@ std::unordered_map<memcache_key, memcache_value> cache;
 
 
 static void send(int fd, const struct sockaddr_in &remote_addr,
-        const memcached_header &header, const char *body, size_t bodylen)
+        const memcached_header &header,
+        const char *body, size_t bodylen)
 {
     iovec iov[2];
     // The msghdr type predates "const". sendmsg will not write to any of the
@@ -114,7 +115,8 @@ static void send(int fd, const struct sockaddr_in &remote_addr,
 }
 
 static void send(int fd, const struct sockaddr_in &remote_addr,
-        const memcached_header &header, const char *body1, size_t bodylen1,
+        const memcached_header &header,
+        const char *body1, size_t bodylen1,
         const char *body2, size_t bodylen2)
 {
     iovec iov[3];
@@ -135,6 +137,34 @@ static void send(int fd, const struct sockaddr_in &remote_addr,
     msg.msg_controllen = 0;
     sendmsg(fd, &msg, 0);
 }
+
+static void send(int fd, const struct sockaddr_in &remote_addr,
+        const memcached_header &header,
+        const char *body1, size_t bodylen1,
+        const char *body2, size_t bodylen2,
+        const char *body3, size_t bodylen3)
+{
+    iovec iov[4];
+    // The msghdr type predates "const". sendmsg will not write to any of the
+    // pointers we give it.
+    iov[0].iov_base = const_cast<void*>((const void*)&header);
+    iov[0].iov_len = sizeof(header);
+    iov[1].iov_base = const_cast<void*>((const void*)body1);
+    iov[1].iov_len = bodylen1;
+    iov[2].iov_base = const_cast<void*>((const void*)body2);
+    iov[2].iov_len = bodylen2;
+    iov[3].iov_base = const_cast<void*>((const void*)body3);
+    iov[3].iov_len = bodylen3;
+    msghdr msg;
+    msg.msg_name = const_cast<void*>((const void*)&remote_addr);
+    msg.msg_namelen = sizeof(remote_addr);
+    msg.msg_iov = iov;
+    msg.msg_iovlen = 4;
+    msg.msg_control = 0;
+    msg.msg_controllen = 0;
+    sendmsg(fd, &msg, 0);
+}
+
 
 static void send_cmd_error(int fd, const struct sockaddr_in &remote_addr,
         const memcached_header &header)
@@ -201,7 +231,11 @@ static void process_request(const char* packet, size_t len,
                 r += strlen(key); // do we have this already?
                 r += sprintf(r, "%ld %d\r\n", it->second.flags, it->second.data.length());
                 constexpr static char msg[] = "END\r\n";
-                send(sendfd, remote_addr, header, reply, r - reply, msg, sizeof(msg) - 1);
+                send(sendfd, remote_addr,
+                        header,
+                        reply, r - reply,
+                        it->second.data.c_str(), it->second.data.length(),
+                        msg, sizeof(msg) - 1);
                 return;
             }
         } else if(!strncmp(packet, "set", 3)) {
