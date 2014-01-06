@@ -227,7 +227,7 @@ static void process_request(const char* packet, size_t len,
                 char *r = reply + 6;
                 strcpy(r, key);
                 r += strlen(key); // do we have this already?
-                r += sprintf(r, "%ld %d\r\n", it->second.flags, it->second.data.length());
+                r += sprintf(r, " %ld %d\r\n", it->second.flags, it->second.data.length());
                 constexpr static char msg[] = "\r\nEND\r\n";
                 send(sendfd, remote_addr,
                         header,
